@@ -64,7 +64,7 @@ We provide the [`demo.py`](./scripts/demo.py) to test whether the installation i
 python scripts/demo.py
 ```
 
-It will save the prediction as follow to `assets/demo/output.png`.
+It will save the prediction as follows to `assets/demo/output.png`.
 
 ![](assets/demo/output.png)
 
@@ -104,7 +104,7 @@ REPO_ROOT
 │       └── val.hdf5
 ```
 
-By default in our provided config we use `HDF5` as the data backend.
+By default, we use `HDF5` as the data backend in our provided config.
 You can convert each folder using the [script](https://github.com/SysCV/vis4d/blob/main/vis4d/data/io/to_hdf5.py) to generate them.
 
 It is worth noting that if you download the provided `.hdf5` from [here](https://huggingface.co/datasets/RoyYang0714/3D-MOOD), you only need to convert each omni3d dataset to HDF5.
@@ -128,14 +128,14 @@ The other solution is to change the `data_backend` in the [configs](./opendet3d/
 
 ### Model Zoo
 
-Note that the score of Argoverse 2 and ScanNet is the proposed open detection score (**ODS**) and the score for Omni3D test set is AP.
+Note that the score of Argoverse 2 and ScanNet is the proposed open detection score (**ODS**), and the score forthe  Omni3D test set is AP.
 
 | Backbone | Config | Omni3D | **Argoverse 2** | **ScanNet** |
 |:--------:|:------:|:------:|:---------------:|:-----------:|
 | [Swin-T](https://huggingface.co/RoyYang0714/3D-MOOD/resolve/main/gdino3d_swin-t_120e_omni3d_699f69.pt) | [config](./opendet3d/zoo/gdino3d/gdino3d_swin_t_omni3d.py) | 28.4 | 22.4 | 30.2 |
 | [Swin-B](https://huggingface.co/RoyYang0714/3D-MOOD/resolve/main/gdino3d_swin-b_120e_omni3d_834c97.pt) | [config](./opendet3d/zoo/gdino3d/gdino3d_swin_b_omni3d.py) | 30.0 | 23.8 | 31.5 |
 
-For per-dataset results for Omni3D, please refer to the Table 3 of the paper.
+For per-dataset results for Omni3D, please refer to Table 3 of the paper.
 
 ### Testing
 
@@ -149,8 +149,8 @@ vis4d test --config opendet3d/zoo/gdino3d/gdino3d_swin_b_omni3d.py --gpus 1 --ck
 
 ### Training
 
-We use batch size of `128` to train our models.
-The setting is assumed running on the cluster using RTX 4090.
+We use a batch size of `128` to train our models.
+The setting is assumed to be running on the cluster using RTX 4090.
 
 ```bash
 # Swin-T
@@ -162,8 +162,8 @@ vis4d fit --config opendet3d/zoo/gdino3d/gdino3d_swin_b_omni3d.py --gpus 8 --nod
 
 ### ScanNet200
 
-We also provide the code to reproduce our ScanNet200 results in supplementray.
-Note that it will take longer time since we need to chunk the classes.
+We also provide the code to reproduce our ScanNet200 results in the supplementary.
+Note that it will take a longer time since we need to chunk the classes.
 
 ```bash
 vis4d test --config opendet3d/zoo/gdino3d/gdino3d_swin_b_scannet200.py --gpus 1 --ckpt https://huggingface.co/RoyYang0714/3D-MOOD/resolve/main/gdino3d_swin-b_120e_omni3d_834c97.pt
@@ -180,12 +180,14 @@ vis4d test --config opendet3d/zoo/gdino3d/gdino3d_swin_b_omni3d.py --gpus 1 --ck
 
 ## Citation
 
-If you find our work useful in your research please consider citing our publications:
+If you find our work useful in your research, please consider citing our publications:
 ```bibtex
-@article{yang20253d,
-  title={3D-MOOD: Lifting 2D to 3D for Monocular Open-Set Object Detection},
-  author={Yang, Yung-Hsu and Piccinelli, Luigi and Segu, Mattia and Li, Siyuan and Huang, Rui and Fu, Yuqian and Pollefeys, Marc and Blum, Hermann and Bauer, Zuria},
-  journal={arXiv preprint arXiv:2507.23567},
-  year={2025}
+@InProceedings{Yang_2025_ICCV,
+    author    = {Yang, Yung-Hsu and Piccinelli, Luigi and Segu, Mattia and Li, Siyuan and Huang, Rui and Fu, Yuqian and Pollefeys, Marc and Blum, Hermann and Bauer, Zuria},
+    title     = {3D-MOOD: Lifting 2D to 3D for Monocular Open-Set Object Detection},
+    booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
+    month     = {October},
+    year      = {2025},
+    pages     = {7429-7439}
 }
 ```
