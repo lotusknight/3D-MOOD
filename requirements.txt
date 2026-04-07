@@ -1,8 +1,12 @@
 wandb
 einops
+datasets>=2.14.0
 fvcore
 nltk
-transformers
+transformers>=4.36.0,<5
 fairscale
 mmengine
 pyarrow
+fastapi<0.100
+uvicorn
+python-multipart

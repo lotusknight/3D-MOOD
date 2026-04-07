@@ -1,0 +1,23 @@
+services:
+  fastapi:
+    image: 3d-mood-fastapi-smoke:latest
+    build:
+      context: .
+    pull_policy: never
+    ports:
+      - "${MOOD_PORT:-18036}:8000"
+    gpus: all
+    environment:
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+    volumes:
+      - "${HOME}/.cache/huggingface:/root/.cache/huggingface"
+      - "${HOME}/.cache/torch:/root/.cache/torch"
+    command:
+      - python
+      - scripts/serve_fastapi.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"

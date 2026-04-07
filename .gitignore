@@ -80,3 +80,9 @@ wandb/
 
 # No lightning logs
 lightning_logs/
+
+# runs
+runs/
+
+# data
+caltech101/

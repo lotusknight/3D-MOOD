@@ -1,5 +1,8 @@
 """Demo 3D-MOOD with custom images."""
 
+import time
+from pathlib import Path
+
 import numpy as np
 import torch
 from PIL import Image
@@ -26,7 +29,11 @@ from opendet3d.op.fpp.channel_mapper import ChannelMapper
 
 
 def get_3d_mood_swin_base(
-    max_per_image: int = 100, score_thres: float = 0.1
+    max_per_image: int = 100,
+    score_thres: float = 0.1,
+    nms: bool = True,
+    class_agnostic_nms: bool = True,
+    iou_thres: float = 0.5,
 ) -> GroundingDINO3D:
     """Get the config of Swin-Base."""
     basemodel = SwinTransformer(
@@ -65,10 +72,11 @@ def get_3d_mood_swin_base(
     bbox3d_head = GroundingDINO3DHead(box_coder=box_coder)
 
     roi2det3d = RoI2Det3D(
-        nms=True,
-        class_agnostic_nms=True,
+        nms=nms,
+        class_agnostic_nms=class_agnostic_nms,
         max_per_img=max_per_image,
         score_threshold=score_thres,
+        iou_threshold=iou_thres,
     )
 
     return GroundingDINO3D(
@@ -81,14 +89,33 @@ def get_3d_mood_swin_base(
     )
 
 
+def _save_input_output_preview(
+    input_path: Path, output_path: Path, save_path: Path
+) -> None:
+    """Save a side-by-side RGB preview (input | output), height-aligned."""
+    left = Image.open(input_path).convert("RGB")
+    right = Image.open(output_path).convert("RGB")
+    if right.height != left.height:
+        new_w = max(1, int(round(right.width * left.height / right.height)))
+        right = right.resize((new_w, left.height), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (left.width + right.width, left.height), (40, 40, 40))
+    canvas.paste(left, (0, 0))
+    canvas.paste(right, (left.width, 0))
+    canvas.save(save_path)
+
+
 if __name__ == "__main__":
     """Demo."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    demo_dir = Path(__file__).resolve().parent.parent / "assets" / "demo"
+    input_image_path = demo_dir / "rgb.png"
+    output_image_path = demo_dir / "output.png"
+    compare_image_path = demo_dir / "input_output_compare.png"
 
     text_prompts = "chair.table"
 
     # Data
-    images = np.array(Image.open("./assets/demo/rgb.png")).astype(np.float32)[
+    images = np.array(Image.open(input_image_path)).astype(np.float32)[
         None, ...
     ]
     intrinsics = np.load("./assets/demo/intrinsics.npy")
@@ -123,19 +150,29 @@ if __name__ == "__main__":
     to_tensor = ToTensor()
     data = to_tensor([data])[0]
 
-    # Model
+    # Model build (structure + move to device)
+    t0 = time.perf_counter()
     model = get_3d_mood_swin_base().to(device)
+    t1 = time.perf_counter()
+    model_build_s = t1 - t0
 
+    # Checkpoint load
+    t0 = time.perf_counter()
     load_model_checkpoint(
         model,
         weights="https://huggingface.co/RoyYang0714/3D-MOOD/resolve/main/gdino3d_swin-b_120e_omni3d_834c97.pt",
         rev_keys=[(r"^model\.", ""), (r"^module\.", "")],
     )
+    t1 = time.perf_counter()
+    checkpoint_load_s = t1 - t0
 
     model.eval()
 
-    # Run predict
+    # Inference (forward only)
     with torch.no_grad():
+        if device == "cuda":
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
         boxes, boxes3d, scores, class_ids, depth_maps, categories = model(
             images=data["images"].to(device),
             input_hw=[data["input_hw"]],
@@ -144,8 +181,13 @@ if __name__ == "__main__":
             padding=[data["padding"]],
             input_texts=[input_texts],
         )
+        if device == "cuda":
+            torch.cuda.synchronize()
+        t1 = time.perf_counter()
+    inference_s = t1 - t0
 
     # Save the prediction for visualization
+    t0 = time.perf_counter()
     imshow_bboxes3d(
         image=data["original_images"].cpu(),
         boxes3d=[b.cpu() for b in boxes3d],
@@ -153,6 +195,23 @@ if __name__ == "__main__":
         scores=[s.cpu() for s in scores],
         class_ids=[c.cpu() for c in class_ids],
         class_id_mapping=class_id_mapping,
-        file_path="./assets/demo/output.png",
+        file_path=str(output_image_path),
         n_colors=len(class_id_mapping),
     )
+    _save_input_output_preview(
+        input_image_path, output_image_path, compare_image_path
+    )
+    t1 = time.perf_counter()
+    visualization_s = t1 - t0
+
+    model_load_total_s = model_build_s + checkpoint_load_s
+
+    print(f"[3D-MOOD demo] device={device}")
+    print(f"[Timing] model_build (init + .to(device)): {model_build_s:.3f} s")
+    print(f"[Timing] checkpoint_load:              {checkpoint_load_s:.3f} s")
+    print(f"[Timing] model_load_total:             {model_load_total_s:.3f} s")
+    print(f"[Timing] inference (forward only):     {inference_s:.3f} s")
+    print(f"[Timing] visualization + compare png:  {visualization_s:.3f} s")
+    print(f"[Paths] input:  {input_image_path}")
+    print(f"[Paths] output: {output_image_path}")
+    print(f"[Paths] compare (input|output): {compare_image_path}")

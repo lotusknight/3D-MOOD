@@ -40,6 +40,8 @@ Please check the [document](https://vis4d.readthedocs.io) for more details.
 We support Python 3.11+ and PyTorch 2.4.0+.
 Please install the correct PyTorch version according to your own hardware settings.
 
+For a **Conda walkthrough**, slow-network workarounds (`vis4d_cuda_ops` git timeouts, Hugging Face mirrors, checkpoint cache), and dependency pitfalls, see [docs/DEPLOYMENT_CN.md](./docs/DEPLOYMENT_CN.md) (Chinese).
+
 ```bash
 conda create -n opendet3d python=3.11 -y
 
@@ -69,6 +71,69 @@ It will save the prediction as follows to `assets/demo/output.png`.
 ![](assets/demo/output.png)
 
 You can also try the live demo on [here](https://huggingface.co/spaces/RoyYang0714/3D-MOOD)!
+
+### FastAPI Service
+
+For simple online inference, we provide [`scripts/serve_fastapi.py`](./scripts/serve_fastapi.py).
+The service keeps a single model instance in memory and processes uploaded images **sequentially with B=1**.
+
+Install the extra runtime dependencies:
+
+```bash
+pip install fastapi uvicorn python-multipart
+```
+
+Start the service:
+
+```bash
+python scripts/serve_fastapi.py --host 0.0.0.0 --port 8000
+```
+
+Example request:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/predict" \
+  -F "files=@assets/demo/rgb.png" \
+  -F "prompt=chair.table" \
+  -F "return_vis=false"
+```
+
+The response is JSON. Each image returns a `cuboids` array, where each cuboid includes:
+
+- `score`
+- `class_id`
+- `label`
+- `bbox_2d_xyxy`
+- `center_cam`
+- `dimensions_wlh`
+- `dimensions_whl`
+- `rotation_quat`
+- `depth`
+
+If `return_vis=true`, the response additionally includes `vis_image_base64` for each image.
+
+#### Docker and fully offline inference
+
+Build the GPU image (see [`Dockerfile`](./Dockerfile) for CUDA / PyTorch pins):
+
+```bash
+docker build -t 3d-mood-fastapi .
+```
+
+If the container **cannot reach the public internet**, first download the Swin-B checkpoint and the `bert-base-uncased` tokenizer on a networked machine (they land under `~/.cache/torch/hub/checkpoints/` and `~/.cache/huggingface/hub/` by default). Then run with read-only cache mounts, offline flags for Transformers, and an explicit local checkpoint path:
+
+```bash
+docker run --rm --gpus all -p 8000:8000 \
+  -e TRANSFORMERS_OFFLINE=1 \
+  -e HF_HUB_OFFLINE=1 \
+  -v ~/.cache/torch/hub/checkpoints:/root/.cache/torch/hub/checkpoints:ro \
+  -v ~/.cache/huggingface:/root/.cache/huggingface:ro \
+  3d-mood-fastapi \
+  python scripts/serve_fastapi.py --host 0.0.0.0 --port 8000 \
+    --ckpt /root/.cache/torch/hub/checkpoints/gdino3d_swin-b_120e_omni3d_834c97.pt
+```
+
+The default image command starts the server without `--ckpt`; override the command as above when you must avoid any download inside the container.
 
 ### Data Preparation
 
