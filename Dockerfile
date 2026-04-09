@@ -38,7 +38,7 @@ RUN add-apt-repository -y ppa:deadsnakes/ppa \
 
 WORKDIR /app
 
-COPY . /app
+COPY pyproject.toml requirements.txt /app/
 
 RUN python -m pip install --upgrade pip setuptools wheel
 
@@ -62,7 +62,11 @@ RUN curl -L --retry 5 --retry-delay 5 \
     --no-cache-dir \
     && rm -rf /tmp/vis4d_cuda_ops /tmp/vis4d_cuda_ops.tar.gz
 
-RUN python -m pip install -e .
+RUN python -m pip install -r requirements.txt
+
+COPY . /app
+
+RUN python -m pip install -e . --no-deps
 
 EXPOSE 8000
 

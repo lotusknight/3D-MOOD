@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
@@ -82,10 +83,13 @@ def _runtime_deps() -> dict[str, Any]:
     """
     import torch
     from vis4d.common.ckpt import load_model_checkpoint
+    from vis4d.data.const import AxisMode
     from vis4d.data.transforms.base import compose
     from vis4d.data.transforms.normalize import NormalizeImages
     from vis4d.data.transforms.resize import ResizeImages, ResizeIntrinsics
     from vis4d.data.transforms.to_tensor import ToTensor
+    from vis4d.op.box.box3d import boxes3d_to_corners
+    from vis4d.op.geometry.projection import project_points
     from vis4d.vis.image.functional import imshow_bboxes3d
 
     from opendet3d.data.transforms.pad import (
@@ -99,11 +103,14 @@ def _runtime_deps() -> dict[str, Any]:
     return {
         "torch": torch,
         "load_model_checkpoint": load_model_checkpoint,
+        "AxisMode": AxisMode,
         "compose": compose,
         "NormalizeImages": NormalizeImages,
         "ResizeImages": ResizeImages,
         "ResizeIntrinsics": ResizeIntrinsics,
         "ToTensor": ToTensor,
+        "boxes3d_to_corners": boxes3d_to_corners,
+        "project_points": project_points,
         "imshow_bboxes3d": imshow_bboxes3d,
         "CenterPadImages": CenterPadImages,
         "CenterPadIntrinsics": CenterPadIntrinsics,
@@ -219,36 +226,87 @@ def _rounded_list(values: np.ndarray, ndigits: int = 6) -> list[float]:
     return [round(float(v), ndigits) for v in values.tolist()]
 
 
+def _rounded_point(point: np.ndarray, ndigits: int = 1) -> dict[str, float]:
+    return {
+        "x": round(float(point[0]), ndigits),
+        "y": round(float(point[1]), ndigits),
+    }
+
+
+def _sort_face_corners(face_points: np.ndarray) -> dict[str, dict[str, float]]:
+    """Map four projected face points to tl/tr/br/bl."""
+    order = np.argsort(face_points[:, 1], kind="stable")
+    top = face_points[order[:2]]
+    bottom = face_points[order[2:]]
+    top = top[np.argsort(top[:, 0], kind="stable")]
+    bottom = bottom[np.argsort(bottom[:, 0], kind="stable")]
+    return {
+        "tl": _rounded_point(top[0]),
+        "tr": _rounded_point(top[1]),
+        "br": _rounded_point(bottom[1]),
+        "bl": _rounded_point(bottom[0]),
+    }
+
+
+def _project_box_faces(
+    boxes3d: np.ndarray,
+    intrinsics: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project 3D cuboids to 2D faces and their depths."""
+    deps = _runtime_deps()
+    torch = deps["torch"]
+    boxes3d_tensor = torch.as_tensor(boxes3d, dtype=torch.float32)
+    intrinsics_tensor = torch.as_tensor(intrinsics, dtype=torch.float32)
+    corners_3d = deps["boxes3d_to_corners"](
+        boxes3d_tensor,
+        deps["AxisMode"].OPENCV,
+    )
+    corners_2d = deps["project_points"](
+        corners_3d.reshape(-1, 3),
+        intrinsics_tensor,
+    ).reshape(-1, 8, 2)
+    face_points = corners_2d.reshape(-1, 2, 4, 2).detach().cpu().numpy()
+    face_depths = (
+        corners_3d[..., 2].reshape(-1, 2, 4).mean(dim=2).detach().cpu().numpy()
+    )
+    return face_points, face_depths
+
+
 def build_cuboids(
-    boxes: np.ndarray,
     boxes3d: np.ndarray,
     scores: np.ndarray,
     class_ids: np.ndarray,
     class_id_mapping: dict[int, str],
+    intrinsics: np.ndarray,
 ) -> list[dict[str, Any]]:
     """Build JSON-ready cuboid records for one image."""
+    if scores.size == 0:
+        return []
+
+    order = np.argsort(-scores, kind="stable")
+    boxes3d = boxes3d[order]
+    scores = scores[order]
+    class_ids = class_ids[order]
+    face_points, face_depths = _project_box_faces(boxes3d, intrinsics)
     cuboids: list[dict[str, Any]] = []
-    for box, box3d, score, class_id in zip(
-        boxes, boxes3d, scores, class_ids
+    for idx, (faces_2d, faces_z, score, class_id) in enumerate(
+        zip(face_points, face_depths, scores, class_ids),
+        start=1,
     ):
         class_id_int = int(class_id)
+        front_face_idx = int(np.argmin(faces_z))
+        back_face_idx = 1 - front_face_idx
+        label = class_id_mapping.get(class_id_int, str(class_id_int))
         cuboids.append(
             {
+                "id": uuid.uuid4().hex[:11],
+                "direction": "front",
+                "front": _sort_face_corners(faces_2d[front_face_idx]),
+                "back": _sort_face_corners(faces_2d[back_face_idx]),
+                "label": label,
+                "order": idx,
                 "score": round(float(score), 6),
-                "class_id": class_id_int,
-                "label": class_id_mapping.get(class_id_int, str(class_id_int)),
-                "bbox_2d_xyxy": _rounded_list(np.asarray(box, dtype=np.float32)),
-                "center_cam": _rounded_list(np.asarray(box3d[:3], dtype=np.float32)),
-                "dimensions_wlh": _rounded_list(
-                    np.asarray(box3d[3:6], dtype=np.float32)
-                ),
-                "dimensions_whl": _rounded_list(
-                    np.asarray(box3d[[3, 5, 4]], dtype=np.float32)
-                ),
-                "rotation_quat": _rounded_list(
-                    np.asarray(box3d[6:10], dtype=np.float32)
-                ),
-                "depth": round(float(box3d[2]), 6),
+                "original_cuboid_label": label,
             }
         )
     return cuboids
@@ -502,9 +560,6 @@ async def predict(
                 "inference_seconds": infer_seconds,
                 "num_predictions": int(scores[0].numel()) if scores else 0,
                 "cuboids": build_cuboids(
-                    boxes=np.asarray(_to_jsonable(boxes[0]), dtype=np.float32)
-                    if boxes
-                    else np.empty((0, 4), dtype=np.float32),
                     boxes3d=np.asarray(
                         _to_jsonable(boxes3d[0]), dtype=np.float32
                     )
@@ -519,6 +574,7 @@ async def predict(
                     if class_ids
                     else np.empty((0,), dtype=np.int64),
                     class_id_mapping=class_id_mapping,
+                    intrinsics=data["original_intrinsics"].cpu().numpy(),
                 ),
                 "categories": _to_jsonable(categories),
             }
