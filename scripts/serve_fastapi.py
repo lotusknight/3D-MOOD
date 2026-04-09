@@ -233,43 +233,93 @@ def _rounded_point(point: np.ndarray, ndigits: int = 1) -> dict[str, float]:
     }
 
 
-def _sort_face_corners(face_points: np.ndarray) -> dict[str, dict[str, float]]:
-    """Map four projected face points to tl/tr/br/bl."""
-    order = np.argsort(face_points[:, 1], kind="stable")
-    top = face_points[order[:2]]
-    bottom = face_points[order[2:]]
-    top = top[np.argsort(top[:, 0], kind="stable")]
-    bottom = bottom[np.argsort(bottom[:, 0], kind="stable")]
+_FACE_PAIR_INDICES = [
+    ([0, 2, 6, 4], [1, 3, 7, 5]),  # near ↔ far  (z-axis)
+    ([0, 1, 5, 4], [2, 3, 7, 6]),  # right ↔ left (+x ↔ -x)
+    ([0, 1, 3, 2], [4, 5, 7, 6]),  # bottom ↔ top (+y ↔ -y in OPENCV)
+]
+
+
+def _sort_face_corners(face_pts_2d: np.ndarray) -> dict[str, dict[str, float]]:
+    """Map four projected 2D face points to tl / tr / br / bl.
+
+    Uses angle-based sorting around the centroid so that even highly
+    foreshortened quads keep a consistent winding.
+    """
+    cx, cy = face_pts_2d.mean(axis=0)
+    angles = np.arctan2(-(face_pts_2d[:, 1] - cy), face_pts_2d[:, 0] - cx)
+    order = np.argsort(-angles, kind="stable")
+    pts = face_pts_2d[order]
+    start = int(np.argmin(pts[:, 0] + pts[:, 1]))
+    pts = np.roll(pts, -start, axis=0)
     return {
-        "tl": _rounded_point(top[0]),
-        "tr": _rounded_point(top[1]),
-        "br": _rounded_point(bottom[1]),
-        "bl": _rounded_point(bottom[0]),
+        "tl": _rounded_point(pts[0]),
+        "tr": _rounded_point(pts[1]),
+        "br": _rounded_point(pts[2]),
+        "bl": _rounded_point(pts[3]),
     }
 
 
-def _project_box_faces(
+def _compute_cuboid_faces(
     boxes3d: np.ndarray,
     intrinsics: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Project 3D cuboids to 2D faces and their depths."""
+) -> list[tuple[np.ndarray, np.ndarray, int]]:
+    """For each box return (front_2d[4,2], back_2d[4,2], best_pair_idx).
+
+    Evaluates all 3 opposite-face pairs per cuboid and picks the pair whose
+    "front" face is most directly facing the camera.
+    """
     deps = _runtime_deps()
     torch = deps["torch"]
-    boxes3d_tensor = torch.as_tensor(boxes3d, dtype=torch.float32)
-    intrinsics_tensor = torch.as_tensor(intrinsics, dtype=torch.float32)
+    boxes3d_t = torch.as_tensor(boxes3d, dtype=torch.float32)
+    intrinsics_t = torch.as_tensor(intrinsics, dtype=torch.float32)
+
     corners_3d = deps["boxes3d_to_corners"](
-        boxes3d_tensor,
-        deps["AxisMode"].OPENCV,
+        boxes3d_t, deps["AxisMode"].OPENCV
     )
-    corners_2d = deps["project_points"](
-        corners_3d.reshape(-1, 3),
-        intrinsics_tensor,
-    ).reshape(-1, 8, 2)
-    face_points = corners_2d.reshape(-1, 2, 4, 2).detach().cpu().numpy()
-    face_depths = (
-        corners_3d[..., 2].reshape(-1, 2, 4).mean(dim=2).detach().cpu().numpy()
+    corners_2d = (
+        deps["project_points"](corners_3d.reshape(-1, 3), intrinsics_t)
+        .reshape(-1, 8, 2)
+        .detach()
+        .cpu()
+        .numpy()
     )
-    return face_points, face_depths
+    corners_3d_np = corners_3d.detach().cpu().numpy()
+
+    n_boxes = corners_3d_np.shape[0]
+    results: list[tuple[np.ndarray, np.ndarray, int]] = []
+
+    for bi in range(n_boxes):
+        c3 = corners_3d_np[bi]
+        c2 = corners_2d[bi]
+        best_score = -1e30
+        best_front_2d = best_back_2d = None
+        best_pair = 0
+        for pi, (fi, oi) in enumerate(_FACE_PAIR_INDICES):
+            for face_idx, opp_idx in [(fi, oi), (oi, fi)]:
+                f3 = c3[face_idx]
+                center_3d = f3.mean(axis=0)
+                e1 = f3[1] - f3[0]
+                e2 = f3[3] - f3[0]
+                normal = np.cross(e1, e2)
+                norm_len = np.linalg.norm(normal)
+                if norm_len < 1e-12:
+                    continue
+                normal /= norm_len
+                to_cam = -center_3d
+                to_cam_len = np.linalg.norm(to_cam)
+                if to_cam_len < 1e-12:
+                    continue
+                to_cam /= to_cam_len
+                score = float(np.dot(normal, to_cam))
+                score = abs(score)
+                if score > best_score:
+                    best_score = score
+                    best_front_2d = c2[face_idx]
+                    best_back_2d = c2[opp_idx]
+                    best_pair = pi
+        results.append((best_front_2d, best_back_2d, best_pair))
+    return results
 
 
 def build_cuboids(
@@ -287,22 +337,20 @@ def build_cuboids(
     boxes3d = boxes3d[order]
     scores = scores[order]
     class_ids = class_ids[order]
-    face_points, face_depths = _project_box_faces(boxes3d, intrinsics)
+    face_data = _compute_cuboid_faces(boxes3d, intrinsics)
     cuboids: list[dict[str, Any]] = []
-    for idx, (faces_2d, faces_z, score, class_id) in enumerate(
-        zip(face_points, face_depths, scores, class_ids),
+    for idx, ((cam_facing_2d, cam_away_2d, _pair), score, class_id) in enumerate(
+        zip(face_data, scores, class_ids),
         start=1,
     ):
-        class_id_int = int(class_id)
-        front_face_idx = int(np.argmin(faces_z))
-        back_face_idx = 1 - front_face_idx
-        label = class_id_mapping.get(class_id_int, str(class_id_int))
+        cid = int(class_id)
+        label = class_id_mapping.get(cid, str(cid))
         cuboids.append(
             {
                 "id": uuid.uuid4().hex[:11],
                 "direction": "front",
-                "front": _sort_face_corners(faces_2d[front_face_idx]),
-                "back": _sort_face_corners(faces_2d[back_face_idx]),
+                "front": _sort_face_corners(cam_away_2d),
+                "back": _sort_face_corners(cam_facing_2d),
                 "label": label,
                 "order": idx,
                 "score": round(float(score), 6),
